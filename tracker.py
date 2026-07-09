@@ -1,11 +1,13 @@
 """
-tracker.py v5.3 — Guarda resultados en Excel automáticamente.
+tracker.py v5.4 — Guarda resultados en Excel automáticamente.
 Requiere: pip install openpyxl
 """
 from __future__ import annotations
 import os
 from datetime import datetime
 from typing import Optional
+
+import pandas as pd
 
 try:
     from openpyxl import load_workbook
@@ -195,7 +197,7 @@ def save_best_run(configs: dict, version: str = "v4") -> None:
             metrics       = m,
             config_name   = name.strip(),
             version       = version,
-            notes         = f"Auto v5.3 {datetime.now().strftime('%H:%M')}",
+            notes         = f"Auto v5.4 {datetime.now().strftime('%H:%M')}",
             strategy_mode = name,
             extra         = extra,
         )
@@ -203,3 +205,13 @@ def save_best_run(configs: dict, version: str = "v4") -> None:
             saved += 1
     if saved:
         print(f"   ✅ {saved} resultados guardados en trading_tracker.xlsx")
+
+
+def export_trades_csv(trades: pd.DataFrame, filename: str) -> str:
+    """Exporta trades detallados a CSV para auditoria reproducible."""
+    from config import RESULTS_DIR
+
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    path = os.path.join(RESULTS_DIR, filename)
+    trades.to_csv(path, index=False)
+    return path

@@ -1,0 +1,8 @@
+rows_raw: 7998
+duplicates_removed: 0
+null_rows_removed: 0
+gaps_detected: 310
+session_gaps_detected: 309
+unexpected_gaps_detected: 1
+last_incomplete_removed: False
+rows_final: 7998

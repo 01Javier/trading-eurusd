@@ -6,11 +6,12 @@ Comandos:
   --walkforward : Solo Walk-Forward
   --monte-carlo : Solo Monte Carlo
   --validate    : Bootstrap + Holdout + Resumen de confianza (NUEVO v5.4)
-  --compare-assets: EUR/USD vs XAUUSD con analisis de metas
+  --compare-assets: comparacion multi-activo con analisis de metas
   --diagnose    : Diagnóstico de filtros por estrategia
   --download    : Descarga datos de MT5
   --download-asset SYMBOL : Descarga un activo canonico, ej. XAUUSD
   --download-assets: Descarga todos los activos configurados
+  --compare-timeframes: compara M5/M15/H1/H4 sin reoptimizar
 """
 from __future__ import annotations
 import argparse
@@ -22,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import (
     SYMBOL, CAPITAL, INDICATORS, SESSION_MODE,
     DATA_DIR, RESULTS_DIR, HOLDOUT_MONTHS, BOOTSTRAP,
-    INSTRUMENTS,
+    INSTRUMENTS, SYMBOLS,
 )
 from mt5_data   import download_all, download_many, load_csv, synthetic_data
 from indicators import generate_signals
@@ -35,13 +36,16 @@ from analysis   import (
     robustness, bootstrap_trades, holdout_test
 )
 from charts import plot_backtest, plot_monte_carlo, plot_walkforward
+from optimizer import evaluate_risk_profiles, conservative_rank
+from report_generator import write_compare_assets_report
 
 try:
-    from tracker import save_best_run
+    from tracker import save_best_run, export_trades_csv
     TRACKER_OK = True
 except ImportError:
     TRACKER_OK = False
     save_best_run = None  # type: ignore[assignment]
+    export_trades_csv = None  # type: ignore[assignment]
 
 BANNER = """
 ╔══════════════════════════════════════════════════════════════════════╗
@@ -546,6 +550,10 @@ def cmd_backtest(show_comparison: bool = True) -> dict:
         print(f"\n  Sharpe: "
               f"{'✅ EXCELENTE (>2)' if s>2 else '✅ BUENO (1-2)' if s>1 else '⚠  DÉBIL (0-1)' if s>0 else '❌ NEGATIVO'}")
 
+        if export_trades_csv is not None and not best_res["trades"].empty:
+            csv_path = export_trades_csv(best_res["trades"], "best_backtest_trades.csv")
+            print(f"  Trades CSV       : {csv_path}")
+
     if TRACKER_OK and save_best_run is not None:
         print(f"\n  Guardando en tracker...")
         save_best_run(configs, version="v5.4")
@@ -851,7 +859,7 @@ def cmd_validate() -> None:
 
 def cmd_compare_assets() -> list[dict]:
     print("\n" + "=" * 72)
-    print("  COMPARACION MULTI-ACTIVO CONSERVADORA — EUR/USD vs ORO")
+    print("  COMPARACION MULTI-ACTIVO CONSERVADORA")
     print("=" * 72)
     print(f"  Cuenta base     : ${CAPITAL['initial']:.2f}")
     print(f"  Riesgo/trade    : {CAPITAL['risk_pct']*100:.1f}%")
@@ -859,7 +867,7 @@ def cmd_compare_assets() -> list[dict]:
     print("  '100% efectivas': alta probabilidad validada; no significa cero perdidas.")
 
     results = []
-    for symbol in ("EURUSD", "XAUUSD"):
+    for symbol in SYMBOLS:
         label = INSTRUMENTS[symbol].get("label", symbol)
         print(f"\n  Evaluando {symbol} ({label})...", flush=True)
         item = _evaluate_asset(symbol)
@@ -985,13 +993,152 @@ def cmd_compare_assets() -> list[dict]:
 
     if len(ok_assets) < 2:
         if missing:
-            print("\n  Dashboard Data Analytics: no generado; falta data real para todos los activos.")
-            print("  Siguiente paso para oro: python -X utf8 run.py --download-asset XAUUSD")
+            print("\n  Dashboard Data Analytics: no generado; falta data real para varios activos.")
+            print("  Siguiente paso: python -X utf8 run.py --download-assets")
         else:
             print("\n  Dashboard Data Analytics: no generado; solo hay un activo operable "
                   "con la cuenta y lote actuales.")
+    report_path = write_compare_assets_report(results)
+    print(f"  Reporte Markdown: {report_path}")
     print("\n  Nota: --compare-assets no escribe resultados en el tracker.\n")
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────
+# COMPARE TIMEFRAMES
+# ─────────────────────────────────────────────────────────────────────
+
+def _evaluate_timeframe(symbol: str, timeframe: str) -> dict:
+    path = _data_path(symbol, timeframe)
+    if not os.path.exists(path):
+        return {"symbol": symbol, "timeframe": timeframe, "status": "SIN DATOS"}
+
+    df = load_csv(symbol, timeframe)
+    if df is None or len(df) < 500:
+        return {"symbol": symbol, "timeframe": timeframe, "status": "INSUFICIENTE"}
+
+    df_sig = generate_signals(
+        df,
+        use_session=True,
+        session_mode=SESSION_MODE,
+        use_adx=True,
+        strict_entries=True,
+        use_m15=False,
+        mode=_system_mode(),
+    )
+    signals = int((df_sig["signal"] != 0).sum())
+    res = BacktestEngine(instrument=symbol, trailing_stop=True, partial_tp=True).run(df_sig)
+    metrics = compute_metrics(res)
+    status = "OK"
+    feasibility = _position_feasibility(symbol, df_sig)
+    if signals > 0 and metrics.get("total_trades", 0) == 0 and not feasibility["is_affordable"]:
+        status = "NO OPERABLE"
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "status": status,
+        "bars": len(df),
+        "start": df.index[0].date(),
+        "end": df.index[-1].date(),
+        "signals": signals,
+        "metrics": metrics,
+        "feasibility": feasibility,
+        "contract_confirmed": bool(INSTRUMENTS[symbol].get("contract_confirmed", True)),
+    }
+
+
+def cmd_compare_timeframes(symbol: str | None = None) -> list[dict]:
+    symbols = [symbol.upper()] if symbol else SYMBOLS
+    timeframes = ["M5", "M15", "H1", "H4"]
+    rows = []
+
+    print("\n" + "=" * 84)
+    print("  COMPARACION DE TEMPORALIDADES — SIN REOPTIMIZAR")
+    print("=" * 84)
+    print(f"  Sistema fijo: {_system_mode()} | Sesion: {SESSION_MODE} | Confirmacion M15: OFF")
+
+    for sym in symbols:
+        if sym not in INSTRUMENTS:
+            print(f"\n  {sym}: simbolo no configurado")
+            continue
+        print(f"\n  {sym} ({INSTRUMENTS[sym].get('label', sym)})")
+        for tf in timeframes:
+            row = _evaluate_timeframe(sym, tf)
+            rows.append(row)
+            if row["status"] != "OK":
+                print(f"    {tf:<3} {row['status']}")
+                continue
+            m = row["metrics"]
+            print(f"    {tf:<3} bars:{row['bars']:>5} trades:{m.get('total_trades',0):>4} "
+                  f"WR:{m.get('win_rate',0):>5.1f}% Sharpe:{m.get('sharpe_ratio',0):>6.2f} "
+                  f"PF:{m.get('profit_factor',0):>5.2f} DD:{m.get('max_drawdown_pct',0):>5.1f}% "
+                  f"P&L:{_fmt_money(m.get('net_pnl_usd',0)):>9}")
+
+    print(f"\n  {'Activo':<8} {'TF':<4} {'Estado':<12} {'Trades':>7} {'WR%':>6} "
+          f"{'Sharpe':>8} {'PF':>6} {'DD%':>7} {'P&L':>10}")
+    print("  " + "-" * 82)
+    for row in rows:
+        if row["status"] != "OK":
+            print(f"  {row['symbol']:<8} {row['timeframe']:<4} {row['status']:<12} "
+                  f"{'-':>7} {'-':>6} {'-':>8} {'-':>6} {'-':>7} {'-':>10}")
+            continue
+        m = row["metrics"]
+        print(f"  {row['symbol']:<8} {row['timeframe']:<4} {'OK':<12} "
+              f"{m.get('total_trades',0):>7} "
+              f"{m.get('win_rate',0):>5.1f}% "
+              f"{m.get('sharpe_ratio',0):>8.3f} "
+              f"{m.get('profit_factor',0):>6.2f} "
+              f"{m.get('max_drawdown_pct',0):>6.1f}% "
+              f"{_fmt_money(m.get('net_pnl_usd',0)):>10}")
+
+    print("\n  Nota: esta comparacion no optimiza parametros por timeframe; es prueba de robustez.")
+    return rows
+
+
+# ─────────────────────────────────────────────────────────────────────
+# RISK PROFILES
+# ─────────────────────────────────────────────────────────────────────
+
+def cmd_risk_profiles(symbol: str = SYMBOL) -> list[dict]:
+    symbol = symbol.upper()
+    print("\n" + "=" * 72)
+    print(f"  PERFILES DE RIESGO — {symbol}")
+    print("=" * 72)
+    df_h4 = load_csv(symbol, "H4")
+    if df_h4 is None:
+        print(f"  Sin datos H4 para {symbol}.")
+        return []
+
+    df_sig = generate_signals(
+        df_h4,
+        use_session=True,
+        session_mode=SESSION_MODE,
+        use_adx=True,
+        strict_entries=True,
+        use_m15=False,
+        mode=_system_mode(),
+    )
+    rows = evaluate_risk_profiles(df_sig, symbol=symbol)
+    ranked = conservative_rank(rows)
+    print(f"  Sistema fijo: {_system_mode()} | Sesion: {SESSION_MODE} | M15: OFF")
+    print(f"\n  {'Perfil':<12} {'Risk%':>7} {'Trades':>7} {'WR%':>6} "
+          f"{'PF':>6} {'Sharpe':>8} {'DD%':>7} {'DD$':>8} {'P&L':>10} {'StreakL':>8}")
+    print("  " + "-" * 90)
+    for row in ranked:
+        print(f"  {row['profile']:<12} "
+              f"{row['risk_pct']*100:>6.2f}% "
+              f"{row.get('total_trades',0):>7} "
+              f"{row.get('win_rate',0):>5.1f}% "
+              f"{row.get('profit_factor',0):>6.2f} "
+              f"{row.get('sharpe_ratio',0):>8.3f} "
+              f"{row.get('max_drawdown_pct',0):>6.1f}% "
+              f"${row.get('max_drawdown_usd',0):>7.2f} "
+              f"{_fmt_money(row.get('net_pnl_usd',0)):>10} "
+              f"{row.get('max_loss_streak',0):>8}")
+
+    print("\n  Nota: perfiles agresivos solo son diagnostico; no habilitan trading real.")
+    return rows
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1075,7 +1222,7 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Sistema Trading EUR/USD v5.4")
     p.add_argument("--download",    action="store_true", help="Descargar datos MT5")
     p.add_argument("--download-asset", metavar="SYMBOL",
-                   help="Descargar un activo canonico: EURUSD o XAUUSD")
+                   help="Descargar un activo canonico configurado, ej. EURUSD o XAUUSD")
     p.add_argument("--download-assets", action="store_true",
                    help="Descargar todos los activos configurados")
     p.add_argument("--backtest",    action="store_true", help="Backtest estrategias")
@@ -1084,7 +1231,11 @@ if __name__ == "__main__":
     p.add_argument("--validate",    action="store_true",
                    help="Bootstrap + Holdout — validación estadística completa")
     p.add_argument("--compare-assets", action="store_true",
-                   help="Comparar EUR/USD vs XAUUSD y evaluar metas")
+                   help="Comparar activos configurados y evaluar metas")
+    p.add_argument("--compare-timeframes", nargs="?", const="", metavar="SYMBOL",
+                   help="Comparar M5/M15/H1/H4 para un simbolo o todos")
+    p.add_argument("--risk-profiles", nargs="?", const=SYMBOL, metavar="SYMBOL",
+                   help="Comparar riesgo conservador/base/moderado/agresivo")
     p.add_argument("--diagnose",    action="store_true",
                    help="Diagnóstico de filtros por estrategia")
     p.add_argument("--all",         action="store_true", help="Pipeline completo")
@@ -1098,5 +1249,7 @@ if __name__ == "__main__":
     elif a.walkforward: cmd_walkforward()
     elif a.validate:    cmd_validate()
     elif a.compare_assets: cmd_compare_assets()
+    elif a.compare_timeframes is not None: cmd_compare_timeframes(a.compare_timeframes or None)
+    elif a.risk_profiles: cmd_risk_profiles(a.risk_profiles)
     elif a.diagnose:    cmd_diagnose()
     else:               cmd_all()

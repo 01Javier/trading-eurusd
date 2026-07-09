@@ -108,12 +108,25 @@ class BacktestEngine:
             'spread_pips',
             CAPITAL.get('spread_pips', 1.5),
         ))
+        self.slippage_pips   = float(self.instrument_spec.get(
+            'slippage_pips',
+            CAPITAL.get('slippage_pips', 0.0),
+        ))
+        self.commission_rt   = float(self.instrument_spec.get(
+            'commission_per_lot_round_turn',
+            CAPITAL.get('commission_per_lot_round_turn', 0.0),
+        ))
+
+    def _apply_exit_slippage(self, price: float, direction: int) -> float:
+        """Aplica slippage adverso al cierre."""
+        return price - direction * self.slippage_pips * self.pip_size
 
     def run(self, df):
         pip         = self.pip_size
         spread_pips = self.spread_pips
         pip_value   = self.pip_value
         spread_value = self.spread_value
+        commission_rt = self.commission_rt
         capital     = self.initial_capital
         trades      = []
         equity      = [capital]
@@ -137,33 +150,35 @@ class BacktestEngine:
                         if new_trail > trail_sl:
                             trail_sl = new_trail
                         if row['low'] <= trail_sl:
-                            hit_sl = True; close_price = trail_sl
+                            hit_sl = True; close_price = self._apply_exit_slippage(trail_sl, trade_dir)
                     elif row['low'] <= sl:
-                        hit_sl = True; close_price = sl
+                        hit_sl = True; close_price = self._apply_exit_slippage(sl, trade_dir)
                     if not hit_sl:
                         if self.partial_tp and not tp1_hit and row['high'] >= tp1:
-                            hit_tp1 = True; close_price = tp1
+                            hit_tp1 = True; close_price = self._apply_exit_slippage(tp1, trade_dir)
                         elif row['high'] >= tp2:
-                            hit_tp2 = True; close_price = tp2
+                            hit_tp2 = True; close_price = self._apply_exit_slippage(tp2, trade_dir)
                 else:
                     if self.trailing_stop and tp1_hit:
                         new_trail = row['close'] + entry_atr * self.trail_mult
                         if new_trail < trail_sl:
                             trail_sl = new_trail
                         if row['high'] >= trail_sl:
-                            hit_sl = True; close_price = trail_sl
+                            hit_sl = True; close_price = self._apply_exit_slippage(trail_sl, trade_dir)
                     elif row['high'] >= sl:
-                        hit_sl = True; close_price = sl
+                        hit_sl = True; close_price = self._apply_exit_slippage(sl, trade_dir)
                     if not hit_sl:
                         if self.partial_tp and not tp1_hit and row['low'] <= tp1:
-                            hit_tp1 = True; close_price = tp1
+                            hit_tp1 = True; close_price = self._apply_exit_slippage(tp1, trade_dir)
                         elif row['low'] <= tp2:
-                            hit_tp2 = True; close_price = tp2
+                            hit_tp2 = True; close_price = self._apply_exit_slippage(tp2, trade_dir)
 
                 if hit_tp1 and not tp1_hit:
                     half_lots = lot_size * 0.50
                     pips      = (close_price - entry_price) * trade_dir / pip
                     pnl       = pips * half_lots * pip_value
+                    commission = half_lots * commission_rt * 0.50
+                    pnl      -= commission
                     capital  += pnl
                     equity.append(capital)
                     trades.append({
@@ -173,6 +188,9 @@ class BacktestEngine:
                         'sl': sl, 'tp': tp1,
                         'pnl_usd': round(pnl, 4), 'result': 'WIN_PARTIAL',
                         'capital': round(capital, 4), 'pips': round(pips, 1),
+                        'spread_pips': spread_pips,
+                        'slippage_pips': self.slippage_pips,
+                        'commission_usd': round(commission, 4),
                         'type': 'TP1',
                     })
                     tp1_hit       = True
@@ -186,6 +204,8 @@ class BacktestEngine:
                     active_lots = lot_remaining if tp1_hit else lot_size
                     pips        = (close_price - entry_price) * trade_dir / pip
                     pnl         = pips * active_lots * pip_value
+                    commission  = active_lots * commission_rt * 0.50
+                    pnl        -= commission
                     capital    += pnl
                     equity.append(capital)
                     result = 'WIN' if hit_tp2 else ('BREAKEVEN' if tp1_hit else 'LOSS')
@@ -196,6 +216,9 @@ class BacktestEngine:
                         'sl': sl, 'tp': tp2,
                         'pnl_usd': round(pnl, 4), 'result': result,
                         'capital': round(capital, 4), 'pips': round(pips, 1),
+                        'spread_pips': spread_pips,
+                        'slippage_pips': self.slippage_pips,
+                        'commission_usd': round(commission, 4),
                         'type': 'TP2' if hit_tp2 else 'SL',
                     })
                     in_trade = tp1_hit = False
@@ -203,7 +226,7 @@ class BacktestEngine:
 
             if not in_trade and prev['signal'] != 0 and capital > 50:
                 sig      = int(prev['signal'])
-                entry    = row['open']
+                entry    = row['open'] + sig * self.slippage_pips * pip
                 atrv     = prev['atr']
                 sl_dist  = atrv * self.atr_sl
                 tp1_dist = atrv * self.atr_tp1
@@ -221,12 +244,27 @@ class BacktestEngine:
                     equity.append(capital); continue
 
                 # Descontar spread en cada entrada
-                capital -= spread_pips * lots * spread_value
+                entry_cost = spread_pips * lots * spread_value
+                entry_cost += lots * commission_rt * 0.50
+                capital -= entry_cost
 
                 in_trade = True; trade_dir = sig
                 entry_price = entry; entry_atr = atrv
                 lot_size = lot_remaining = lots
                 tp1_hit = False; entry_dt = row.name
+
+                trades.append({
+                    'entry_dt': entry_dt, 'exit_dt': row.name,
+                    'direction': 'LONG' if trade_dir == 1 else 'SHORT',
+                    'entry_price': entry_price, 'exit_price': entry_price,
+                    'sl': 0.0, 'tp': 0.0,
+                    'pnl_usd': round(-entry_cost, 4), 'result': 'COST',
+                    'capital': round(capital, 4), 'pips': 0.0,
+                    'spread_pips': spread_pips,
+                    'slippage_pips': self.slippage_pips,
+                    'commission_usd': round(lots * commission_rt * 0.50, 4),
+                    'type': 'COST',
+                })
 
                 if sig == 1:
                     sl = entry - sl_dist; tp1 = entry + tp1_dist
@@ -239,9 +277,12 @@ class BacktestEngine:
 
         if in_trade:
             close_p     = df.iloc[-1]['close']
+            close_p     = self._apply_exit_slippage(close_p, trade_dir)
             active_lots = lot_remaining if tp1_hit else lot_size
             pips        = (close_p - entry_price) * trade_dir / pip
             pnl         = pips * active_lots * pip_value
+            commission  = active_lots * commission_rt * 0.50
+            pnl        -= commission
             capital    += pnl
             trades.append({
                 'entry_dt': entry_dt, 'exit_dt': df.index[-1],
@@ -251,6 +292,9 @@ class BacktestEngine:
                 'pnl_usd': round(pnl, 4),
                 'result': 'WIN' if pnl > 0 else 'LOSS',
                 'capital': round(capital, 4), 'pips': round(pips, 1),
+                'spread_pips': spread_pips,
+                'slippage_pips': self.slippage_pips,
+                'commission_usd': round(commission, 4),
                 'type': 'CLOSE',
             })
 
@@ -262,6 +306,17 @@ class BacktestEngine:
             'instrument'     : self.instrument,
             'instrument_spec': self.instrument_spec,
         }
+
+
+def _longest_streak(values: np.ndarray, predicate) -> int:
+    longest = current = 0
+    for value in values:
+        if predicate(value):
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return int(longest)
 
 
 def compute_metrics(results):
@@ -281,14 +336,18 @@ def compute_metrics(results):
     empty = {k: 0 for k in [
         'total_trades', 'wins', 'losses', 'win_rate', 'expectancy_usd',
         'profit_factor', 'sharpe_ratio', 'sortino_ratio', 'max_drawdown_pct',
-        'calmar_ratio', 'avg_win_usd', 'avg_loss_usd', 'actual_rr',
-        'trades_per_year',
+        'max_drawdown_usd', 'calmar_ratio', 'avg_win_usd', 'avg_loss_usd',
+        'actual_rr', 'trades_per_year', 'max_loss_streak', 'max_win_streak',
+        'total_cost_usd', 'avg_cost_per_trade_usd',
         'total_return_pct', 'net_pnl_usd']}
     empty['final_capital'] = round(final, 2)
     if trades.empty or len(trades) < 2:
         return empty
 
     pnls_by_trade = trade_pnls_by_entry(trades)
+    if pnls_by_trade.empty:
+        return empty
+
     trade_ret = trade_returns(trades, initial)
     pnls   = pnls_by_trade.values
     wins   = pnls[pnls > 0]
@@ -318,9 +377,16 @@ def compute_metrics(results):
 
     eq    = equity.values
     peak  = np.maximum.accumulate(eq)
+    dd_abs = peak - eq
+    mdd_usd = float(dd_abs.max()) if len(dd_abs) else 0.0
     mdd   = abs(((eq - peak) / peak).min())
     total_ret = (final - initial) / initial
     calmar    = (total_ret / mdd) if mdd > 0 else 0
+    total_cost = float(trades.loc[
+        trades.get('type', pd.Series(index=trades.index, dtype=object)).eq('COST'),
+        'pnl_usd',
+    ].sum()) if 'type' in trades.columns else 0.0
+    total_cost = abs(total_cost)
 
     return {
         'total_trades'    : len(pnls),
@@ -332,11 +398,16 @@ def compute_metrics(results):
         'sharpe_ratio'    : round(sharpe, 3),
         'sortino_ratio'   : round(sortino, 3),   # nuevo v5.3
         'max_drawdown_pct': round(mdd * 100, 2),
+        'max_drawdown_usd': round(mdd_usd, 2),
         'calmar_ratio'    : round(calmar, 3),
         'avg_win_usd'     : round(avg_win, 4),
         'avg_loss_usd'    : round(avg_loss, 4),
         'actual_rr'       : round(avg_win / avg_loss, 2) if avg_loss > 0 else 0,
         'trades_per_year' : round(trades_per_year, 2),
+        'max_loss_streak' : _longest_streak(pnls, lambda x: x < 0),
+        'max_win_streak'  : _longest_streak(pnls, lambda x: x > 0),
+        'total_cost_usd'  : round(total_cost, 4),
+        'avg_cost_per_trade_usd': round(total_cost / len(pnls), 4) if len(pnls) else 0,
         'total_return_pct': round(total_ret * 100, 2),
         'final_capital'   : round(final, 2),
         'net_pnl_usd'     : round(final - initial, 4),

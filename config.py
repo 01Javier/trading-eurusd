@@ -5,7 +5,25 @@ Base actual: pullback optimizado sobre H4 completo y validado en holdout.
 """
 import os
 
-MT5 = {"login": 5052266610, "password": "TpGjVd*6", "server": "MetaQuotes-Demo", "path": ""}
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "y"}
+
+
+MT5 = {
+    "login": int(os.getenv("MT5_LOGIN", "0") or 0),
+    "password": os.getenv("MT5_PASSWORD", ""),
+    "server": os.getenv("MT5_SERVER", "MetaQuotes-Demo"),
+    "path": os.getenv("MT5_PATH", ""),
+}
+
+TRADING_MODE = {
+    "demo_mode": True,
+    "real_mode": False,
+    "allow_real_trading": _env_bool("ALLOW_REAL_TRADING", False),
+    "require_real_confirmation": "I_UNDERSTAND_REAL_TRADING_RISK",
+    "real_confirmation": os.getenv("REAL_TRADING_CONFIRMATION", ""),
+}
 
 CAPITAL = {
     "initial"        : 150.0,
@@ -20,9 +38,21 @@ CAPITAL = {
     "atr_tp2_mult"   : 4.0,     # TP final — dejar correr
     "trail_atr_mult" : 2.5,     # deja respirar el pullback ganador antes de cerrar
     "spread_pips"    : 1.5,     # EUR/USD spread típico H4
+    "slippage_pips"  : 0.2,
+    "commission_per_lot_round_turn": 0.0,
+    "max_daily_loss_pct": 0.03,
+    "max_weekly_loss_pct": 0.06,
+    "max_loss_streak_pause": 4,
 }
 
-SYMBOLS = ["EURUSD", "XAUUSD"]
+RISK_PROFILES = {
+    "conservador": 0.005,
+    "base": 0.015,
+    "moderado": 0.025,
+    "agresivo": 0.050,
+}
+
+SYMBOLS = ["EURUSD", "XAUUSD", "GBPUSD", "USDJPY", "NAS100", "US30", "BTCUSD"]
 SYMBOL  = "EURUSD"
 
 # Economia por instrumento para backtesting multi-activo.
@@ -35,6 +65,9 @@ INSTRUMENTS = {
         "pip_size": 0.0001,
         "pip_value_per_lot": 0.10,
         "spread_pips": 1.5,
+        "max_spread_pips": 3.0,
+        "slippage_pips": 0.2,
+        "commission_per_lot_round_turn": 0.0,
         "spread_value_per_lot": 0.001,
         "min_lot": 0.01,
         "max_lot": 200.0,
@@ -48,6 +81,9 @@ INSTRUMENTS = {
         "pip_size": 0.01,
         "pip_value_per_lot": 1.00,
         "spread_pips": 30.0,
+        "max_spread_pips": 60.0,
+        "slippage_pips": 5.0,
+        "commission_per_lot_round_turn": 0.0,
         "spread_value_per_lot": 1.00,
         "min_lot": 0.01,
         "max_lot": 50.0,
@@ -56,12 +92,103 @@ INSTRUMENTS = {
         "contract_confirmed": False,
         "contract_note": "Validar pip_value_per_lot y spread_pips con el broker antes de operar.",
     },
+    "GBPUSD": {
+        "label": "GBP/USD",
+        "aliases": ["GBPUSD", "GBPUSDm", "GBPUSD.", "GBPUSD_i"],
+        "pip_size": 0.0001,
+        "pip_value_per_lot": 0.10,
+        "spread_pips": 2.0,
+        "max_spread_pips": 4.0,
+        "slippage_pips": 0.3,
+        "commission_per_lot_round_turn": 0.0,
+        "spread_value_per_lot": 0.001,
+        "min_lot": 0.01,
+        "max_lot": 200.0,
+        "lot_step": 0.01,
+        "required_timeframes": ["M5", "M15", "H1", "H4"],
+        "contract_confirmed": False,
+        "contract_note": "Validar valor de pip y spread con el broker antes de operar.",
+    },
+    "USDJPY": {
+        "label": "USD/JPY",
+        "aliases": ["USDJPY", "USDJPYm", "USDJPY.", "USDJPY_i"],
+        "pip_size": 0.01,
+        "pip_value_per_lot": 0.10,
+        "spread_pips": 2.0,
+        "max_spread_pips": 4.0,
+        "slippage_pips": 0.3,
+        "commission_per_lot_round_turn": 0.0,
+        "spread_value_per_lot": 0.001,
+        "min_lot": 0.01,
+        "max_lot": 200.0,
+        "lot_step": 0.01,
+        "required_timeframes": ["M5", "M15", "H1", "H4"],
+        "contract_confirmed": False,
+        "contract_note": "Validar valor de pip JPY con el broker antes de operar.",
+    },
+    "NAS100": {
+        "label": "NASDAQ 100",
+        "aliases": ["NAS100", "NAS100m", "USTEC", "USTECm", "US100", "US100m"],
+        "pip_size": 1.0,
+        "pip_value_per_lot": 1.0,
+        "spread_pips": 20.0,
+        "max_spread_pips": 50.0,
+        "slippage_pips": 2.0,
+        "commission_per_lot_round_turn": 0.0,
+        "spread_value_per_lot": 1.0,
+        "min_lot": 0.01,
+        "max_lot": 50.0,
+        "lot_step": 0.01,
+        "required_timeframes": ["M5", "M15", "H1", "H4"],
+        "contract_confirmed": False,
+        "contract_note": "Indice CFD: confirmar tick value, contrato y horario del broker.",
+    },
+    "US30": {
+        "label": "Dow Jones / US30",
+        "aliases": ["US30", "US30m", "DJ30", "DJ30m", "WS30", "WS30m"],
+        "pip_size": 1.0,
+        "pip_value_per_lot": 1.0,
+        "spread_pips": 30.0,
+        "max_spread_pips": 80.0,
+        "slippage_pips": 3.0,
+        "commission_per_lot_round_turn": 0.0,
+        "spread_value_per_lot": 1.0,
+        "min_lot": 0.01,
+        "max_lot": 50.0,
+        "lot_step": 0.01,
+        "required_timeframes": ["M5", "M15", "H1", "H4"],
+        "contract_confirmed": False,
+        "contract_note": "Indice CFD: confirmar tick value, contrato y horario del broker.",
+    },
+    "BTCUSD": {
+        "label": "Bitcoin / BTCUSD",
+        "aliases": ["BTCUSD", "BTCUSDm", "BTCUSD.", "BTCUSD_i", "Bitcoin"],
+        "pip_size": 1.0,
+        "pip_value_per_lot": 1.0,
+        "spread_pips": 100.0,
+        "max_spread_pips": 300.0,
+        "slippage_pips": 10.0,
+        "commission_per_lot_round_turn": 0.0,
+        "spread_value_per_lot": 1.0,
+        "min_lot": 0.01,
+        "max_lot": 10.0,
+        "lot_step": 0.01,
+        "required_timeframes": ["M5", "M15", "H1", "H4"],
+        "contract_confirmed": False,
+        "contract_note": "Cripto CFD: confirmar tick value, spread, comision y horario del broker.",
+    },
 }
 
 BARS = {
+    "M5" : 12000,
+    "M15": 12000,
+    "H1" : 10000,
     "H4" : 8000,
-    "M15": 5000,
-    "M1" : 2000,
+}
+
+DATA_RANGE = {
+    "date_from": os.getenv("DATA_DATE_FROM", ""),
+    "date_to": os.getenv("DATA_DATE_TO", ""),
 }
 
 INDICATORS = {
@@ -125,8 +252,12 @@ BOOTSTRAP = {
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR    = os.path.join(BASE_DIR, "data")
 RESULTS_DIR = os.path.join(BASE_DIR, "results")
+LOGS_DIR    = os.path.join(BASE_DIR, "logs")
+REPORTS_DIR = os.path.join(RESULTS_DIR, "reports")
 os.makedirs(DATA_DIR,    exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR,    exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
 
 if __name__ == "__main__":
     print("=" * 58)
