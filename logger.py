@@ -38,15 +38,16 @@ class CsvLogger:
                 existing_fields = next(reader, [])
 
         fieldnames = list(dict.fromkeys(existing_fields + list(payload.keys())))
+        needs_rewrite = file_exists and existing_fields != fieldnames
         rows: list[dict[str, Any]] = []
-        if file_exists and existing_fields != fieldnames:
+        if needs_rewrite:
             with open(self.path, "r", newline="", encoding="utf-8") as f:
                 rows = list(csv.DictReader(f))
 
-        mode = "w" if rows else "a"
+        mode = "w" if needs_rewrite else "a"
         with open(self.path, mode, newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not file_exists or rows:
+            if not file_exists or needs_rewrite:
                 writer.writeheader()
             for row in rows:
                 writer.writerow(row)

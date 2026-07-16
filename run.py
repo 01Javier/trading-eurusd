@@ -12,11 +12,14 @@ Comandos:
   --download-asset SYMBOL : Descarga un activo canonico, ej. XAUUSD
   --download-assets: Descarga todos los activos configurados
   --compare-timeframes: compara M5/M15/H1/H4 sin reoptimizar
+  --growth-plan SYMBOL: simula crecimiento mensual realista
+  --demo-validation: crea plan y log auditable de validacion demo
 """
 from __future__ import annotations
 import argparse
 import os
 import sys
+import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -37,7 +40,14 @@ from analysis   import (
 )
 from charts import plot_backtest, plot_monte_carlo, plot_walkforward
 from optimizer import evaluate_risk_profiles, conservative_rank
-from report_generator import write_compare_assets_report
+from growth_plan import build_growth_plan
+from report_generator import (
+    write_compare_assets_report,
+    write_demo_validation_plan,
+    write_final_recommendation,
+    write_growth_plan_report,
+    write_risk_profiles_report,
+)
 
 try:
     from tracker import save_best_run, export_trades_csv
@@ -134,6 +144,9 @@ def _monthly_stats(equity, initial_capital: float) -> dict:
             "avg_monthly_pnl": 0.0,
             "best_month_pnl": 0.0,
             "worst_month_pnl": 0.0,
+            "positive_month_pct": 0.0,
+            "months": 0,
+            "negative_months": 0,
         }
 
     monthly = equity.resample("ME").last().dropna()
@@ -143,6 +156,9 @@ def _monthly_stats(equity, initial_capital: float) -> dict:
             "avg_monthly_pnl": 0.0,
             "best_month_pnl": 0.0,
             "worst_month_pnl": 0.0,
+            "positive_month_pct": 0.0,
+            "months": 0,
+            "negative_months": 0,
         }
 
     monthly_pnl = monthly.diff()
@@ -158,6 +174,9 @@ def _monthly_stats(equity, initial_capital: float) -> dict:
         "avg_monthly_pnl": round(float(monthly_pnl.mean()), 2),
         "best_month_pnl": round(float(monthly_pnl.max()), 2),
         "worst_month_pnl": round(float(monthly_pnl.min()), 2),
+        "positive_month_pct": round(float((monthly_pnl > 0).mean() * 100), 1),
+        "months": int(len(monthly_pnl)),
+        "negative_months": int((monthly_pnl < 0).sum()),
     }
 
 
@@ -400,6 +419,31 @@ def _choose_recommended_asset(results: list[dict]) -> dict | None:
             item.get("trades_per_month", 0),
         ),
     )
+
+
+def _run_frozen_backtest(symbol: str, timeframe: str = "H4",
+                         risk_pct: float | None = None) -> tuple:
+    df = load_csv(symbol, timeframe)
+    if df is None or df.empty:
+        return None, None, None, None
+    df_sig = generate_signals(
+        df,
+        use_session=True,
+        session_mode=SESSION_MODE,
+        use_adx=True,
+        strict_entries=True,
+        use_m15=False,
+        mode=_system_mode(),
+    )
+    engine = BacktestEngine(
+        instrument=symbol,
+        risk_pct=risk_pct,
+        trailing_stop=True,
+        partial_tp=True,
+    )
+    res = engine.run(df_sig)
+    metrics = compute_metrics(res)
+    return df, df_sig, res, metrics
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -966,30 +1010,18 @@ def cmd_compare_assets() -> list[dict]:
         print(f"  Activo con señales pero no operable por tamaño de cuenta/lote: {item['symbol']} "
               f"(capital minimo estimado {_fmt_money(fz.get('min_capital_required'))})")
 
-    print("\n  Metas financieras con cuenta de $150:")
+    print("\n  Meta financiera profesional con cuenta de $150:")
     if reference is None:
         print("  No hay activo evaluable para estimar capital recomendado.")
     else:
         goals = reference["goals"]
-        weekly_label = "CONSERVADORA" if goals["weekly_is_conservative"] else "NO CONSERVADORA"
-        monthly_label = "CONSERVADORA" if goals["monthly_is_conservative"] else "NO CONSERVADORA"
         print(f"  Referencia usada: {reference['symbol']} "
               f"(retorno mensual historico prom. {goals['avg_monthly_return_pct']:.2f}%)")
-        print(f"  Objetivo realista estimado con $150 al rendimiento validado: "
-              f"{_fmt_money(goals['expected_weekly_usd'])}/semana | "
-              f"{_fmt_money(goals['expected_monthly_usd'])}/mes")
-        print(f"  Meta $100/semana: requiere {goals['weekly_required_pct']:.1f}% semanal "
-              f"-> {weekly_label}")
-        print(f"    Capital recomendado sin subir riesgo: "
-              f"{_fmt_money(goals['weekly_capital_required'])}")
-        print(f"    Riesgo/trade requerido con $150: "
-              f"{_fmt_pct(goals['weekly_risk_required_pct'])}")
-        print(f"  Meta $600/mes: requiere {goals['monthly_required_pct']:.1f}% mensual "
-              f"-> {monthly_label}")
-        print(f"    Capital recomendado sin subir riesgo: "
-              f"{_fmt_money(goals['monthly_capital_required'])}")
-        print(f"    Riesgo/trade requerido con $150: "
-              f"{_fmt_pct(goals['monthly_risk_required_pct'])}")
+        print(f"  Estimado historico con $150: "
+              f"{_fmt_money(goals['expected_monthly_usd'])}/mes antes de validar demo real.")
+        print("  Las metas antiguas de $100/semana o $600/mes quedan descartadas "
+              "como no conservadoras para esta cuenta.")
+        print(f"  Ejecuta growth plan: python -X utf8 -B run.py --growth-plan {reference['symbol']}")
 
     if len(ok_assets) < 2:
         if missing:
@@ -1120,25 +1152,175 @@ def cmd_risk_profiles(symbol: str = SYMBOL) -> list[dict]:
         mode=_system_mode(),
     )
     rows = evaluate_risk_profiles(df_sig, symbol=symbol)
+    for row in rows:
+        _, _, profile_res, _ = _run_frozen_backtest(symbol, "H4", risk_pct=row["risk_pct"])
+        if profile_res is None:
+            continue
+        growth = build_growth_plan(profile_res["equity"], profile_res["initial_capital"])
+        bs = growth["bootstrap"]
+        row["positive_month_probability_pct"] = bs.get("positive_month_probability_pct", 0)
+        row["sim_ruin_prob_pct"] = bs.get("sim_ruin_prob_pct", 0)
+        row["sim_final_capital_median"] = bs.get("sim_final_capital_median", 0)
+        row["months_to_recover_150_profit"] = bs["recover_150_profit"].get("median_months")
+        row["reinvestment_policy"] = (
+            "reinvertir gradual" if row["risk_pct"] <= 0.015 and row.get("max_drawdown_pct", 999) <= 15
+            else "mantener lote/riesgo o reducir"
+        )
     ranked = conservative_rank(rows)
     print(f"  Sistema fijo: {_system_mode()} | Sesion: {SESSION_MODE} | M15: OFF")
-    print(f"\n  {'Perfil':<12} {'Risk%':>7} {'Trades':>7} {'WR%':>6} "
-          f"{'PF':>6} {'Sharpe':>8} {'DD%':>7} {'DD$':>8} {'P&L':>10} {'StreakL':>8}")
-    print("  " + "-" * 90)
+    print(f"\n  {'Perfil':<18} {'Risk%':>7} {'Trades':>7} {'WR%':>6} "
+          f"{'PF':>6} {'Sharpe':>8} {'DD%':>7} {'P&L':>10} {'Mes+':>7} {'Rec150':>8}")
+    print("  " + "-" * 104)
     for row in ranked:
-        print(f"  {row['profile']:<12} "
+        rec = row.get("months_to_recover_150_profit")
+        rec_txt = "N/D" if rec is None else f"{rec:.1f}m"
+        print(f"  {row['profile']:<18} "
               f"{row['risk_pct']*100:>6.2f}% "
               f"{row.get('total_trades',0):>7} "
               f"{row.get('win_rate',0):>5.1f}% "
               f"{row.get('profit_factor',0):>6.2f} "
               f"{row.get('sharpe_ratio',0):>8.3f} "
               f"{row.get('max_drawdown_pct',0):>6.1f}% "
-              f"${row.get('max_drawdown_usd',0):>7.2f} "
               f"{_fmt_money(row.get('net_pnl_usd',0)):>10} "
-              f"{row.get('max_loss_streak',0):>8}")
+              f"{row.get('positive_month_probability_pct',0):>6.1f}% "
+              f"{rec_txt:>8}")
 
+    report_path = write_risk_profiles_report(symbol, ranked)
+    print(f"\n  Reporte Markdown: {report_path}")
     print("\n  Nota: perfiles agresivos solo son diagnostico; no habilitan trading real.")
     return rows
+
+
+# ─────────────────────────────────────────────────────────────────────
+# GROWTH PLAN
+# ─────────────────────────────────────────────────────────────────────
+
+def cmd_growth_plan(symbol: str = SYMBOL) -> dict:
+    symbol = symbol.upper()
+    print("\n" + "=" * 72)
+    print(f"  GROWTH PLAN CONSERVADOR — {symbol}")
+    print("=" * 72)
+    df, df_sig, res, metrics = _run_frozen_backtest(symbol, "H4")
+    if res is None:
+        print(f"  Sin datos H4 para {symbol}.")
+        return {}
+
+    growth = build_growth_plan(res["equity"], res["initial_capital"])
+    bs = growth["bootstrap"]
+    print(f"  Sistema fijo: {_system_mode()} | H4 | M15 OFF")
+    print(f"  Base backtest: Trades {metrics.get('total_trades',0)} | "
+          f"PF {metrics.get('profit_factor',0):.2f} | "
+          f"DD {metrics.get('max_drawdown_pct',0):.1f}% | "
+          f"P&L {_fmt_money(metrics.get('net_pnl_usd',0))}")
+    print(f"  Mes positivo historico: {bs.get('positive_month_probability_pct',0):.1f}% | "
+          f"Meses negativos esperados/año: {bs.get('expected_negative_months_per_year',0):.1f}")
+
+    print(f"\n  {'Escenario':<18} {'Ret/mes':>9} {'Capital 12m':>12} "
+          f"{'A $250':>10} {'Recuperar $150':>16} {'Duplicar':>10}")
+    print("  " + "-" * 84)
+    for scenario in growth["scenarios"]:
+        def mtxt(value):
+            return "N/D" if value is None else f"{value:.1f}m"
+        print(f"  {scenario.name:<18} "
+              f"{scenario.monthly_return_pct:>8.3f}% "
+              f"{_fmt_money(scenario.projected_12m_capital):>12} "
+              f"{mtxt(scenario.months_to_250):>10} "
+              f"{mtxt(scenario.months_to_recover_150_profit):>16} "
+              f"{mtxt(scenario.months_to_double):>10}")
+
+    print("\n  Bootstrap 60 meses:")
+    print(f"  Capital final mediano: {_fmt_money(bs.get('sim_final_capital_median'))} "
+          f"(P25 {_fmt_money(bs.get('sim_final_capital_p25'))}, "
+          f"P75 {_fmt_money(bs.get('sim_final_capital_p75'))})")
+    print(f"  Prob. llegar a $250: {bs['target_250']['prob_hit_pct']:.1f}% | "
+          f"recuperar $150 profit: {bs['recover_150_profit']['prob_hit_pct']:.1f}%")
+    print(f"  Ruina simulada: {bs.get('sim_ruin_prob_pct',0):.2f}% | "
+          f"racha negativa mensual P95: {bs.get('p95_max_negative_month_streak',0):.1f}")
+
+    report_path = write_growth_plan_report(symbol, metrics, growth)
+    final_path = write_final_recommendation({
+        "best_asset": symbol,
+        "best_timeframe": "H4",
+        "suggested_risk": "0.5%-1.0% en demo/paper; 1.5% solo si demo confirma",
+    })
+    print(f"\n  Reporte Markdown: {report_path}")
+    print(f"  Recomendacion final: {final_path}")
+    return {"metrics": metrics, "growth": growth, "report": report_path}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# DEMO VALIDATION
+# ─────────────────────────────────────────────────────────────────────
+
+def _demo_log_path() -> str:
+    return os.path.join(RESULTS_DIR, "demo_signals_log.csv")
+
+
+def _ensure_demo_log() -> str:
+    path = _demo_log_path()
+    if not os.path.exists(path):
+        columns = [
+            "ts_utc", "symbol", "action", "signal_time", "decision", "reason",
+            "spread_pips", "lots", "risk_usd", "risk_pct", "sl", "tp1", "tp2",
+            "backtest_mode", "result", "pnl_usd", "closed",
+        ]
+        pd.DataFrame(columns=columns).to_csv(path, index=False)
+    return path
+
+
+def _demo_validation_status(path: str) -> dict:
+    if not os.path.exists(path):
+        return {"signals": 0, "closed_trades": 0, "profit_factor": "N/A", "max_drawdown_pct": "N/A"}
+
+    df = pd.read_csv(path)
+    signals = int(len(df))
+    if df.empty or "pnl_usd" not in df.columns:
+        return {"signals": signals, "closed_trades": 0, "profit_factor": "N/A", "max_drawdown_pct": "N/A"}
+
+    if "closed" in df.columns:
+        closed_mask = df["closed"].astype(str).str.lower().isin(["true", "1", "yes"])
+        df_closed = df[closed_mask].copy()
+    else:
+        df_closed = df.copy()
+
+    pnl = pd.to_numeric(df_closed.get("pnl_usd"), errors="coerce").dropna()
+    closed = int(len(pnl))
+    if closed == 0:
+        return {"signals": signals, "closed_trades": 0, "profit_factor": "N/A", "max_drawdown_pct": "N/A"}
+
+    wins = pnl[pnl > 0].sum()
+    losses = abs(pnl[pnl < 0].sum())
+    pf = round(float(wins / losses), 2) if losses > 0 else "N/A"
+    equity = CAPITAL["initial"] + pnl.cumsum()
+    peak = equity.cummax()
+    dd = ((equity - peak) / peak).min() * 100 if len(equity) else 0
+    return {
+        "signals": signals,
+        "closed_trades": closed,
+        "profit_factor": pf,
+        "max_drawdown_pct": round(abs(float(dd)), 2),
+    }
+
+
+def cmd_demo_validation() -> dict:
+    print("\n" + "=" * 72)
+    print("  VALIDACION DEMO / PAPER")
+    print("=" * 72)
+    path = _ensure_demo_log()
+    status = _demo_validation_status(path)
+    report_path = write_demo_validation_plan(status)
+    final_path = write_final_recommendation({
+        "best_asset": "EURUSD",
+        "best_timeframe": "H4",
+        "suggested_risk": "0.5%-1.0% mientras no existan 30-50 senales demo",
+    })
+    print(f"  Log demo: {path}")
+    print(f"  Señales registradas: {status.get('signals', 0)}")
+    print(f"  Trades cerrados: {status.get('closed_trades', 0)}")
+    print("  Estado: NO VALIDADO PARA DINERO REAL TODAVIA")
+    print(f"  Reporte Markdown: {report_path}")
+    print(f"  Recomendacion final: {final_path}")
+    return {"status": status, "log": path, "report": report_path}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1236,6 +1418,10 @@ if __name__ == "__main__":
                    help="Comparar M5/M15/H1/H4 para un simbolo o todos")
     p.add_argument("--risk-profiles", nargs="?", const=SYMBOL, metavar="SYMBOL",
                    help="Comparar riesgo conservador/base/moderado/agresivo")
+    p.add_argument("--growth-plan", nargs="?", const=SYMBOL, metavar="SYMBOL",
+                   help="Simular crecimiento mensual y metas realistas")
+    p.add_argument("--demo-validation", action="store_true",
+                   help="Crear/revisar plan de validacion demo")
     p.add_argument("--diagnose",    action="store_true",
                    help="Diagnóstico de filtros por estrategia")
     p.add_argument("--all",         action="store_true", help="Pipeline completo")
@@ -1251,5 +1437,7 @@ if __name__ == "__main__":
     elif a.compare_assets: cmd_compare_assets()
     elif a.compare_timeframes is not None: cmd_compare_timeframes(a.compare_timeframes or None)
     elif a.risk_profiles: cmd_risk_profiles(a.risk_profiles)
+    elif a.growth_plan: cmd_growth_plan(a.growth_plan)
+    elif a.demo_validation: cmd_demo_validation()
     elif a.diagnose:    cmd_diagnose()
     else:               cmd_all()

@@ -47,9 +47,11 @@ CAPITAL = {
 
 RISK_PROFILES = {
     "conservador": 0.005,
-    "base": 0.015,
-    "moderado": 0.025,
-    "agresivo": 0.050,
+    "base_1_0": 0.010,
+    "base_1_5": 0.015,
+    "moderado_2_0": 0.020,
+    "moderado_2_5": 0.025,
+    "agresivo_sim_3_0": 0.030,
 }
 
 SYMBOLS = ["EURUSD", "XAUUSD", "GBPUSD", "USDJPY", "NAS100", "US30", "BTCUSD"]

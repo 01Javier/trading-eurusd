@@ -1,6 +1,6 @@
 # Reporte comparativo multi-activo
 
-Generado: 2026-07-09 13:21
+Generado: 2026-07-09 14:12
 Cuenta base: $150.00
 Riesgo base: 1.50% por operacion
 
@@ -11,15 +11,15 @@ No se promete una tasa de acierto de 100%. El objetivo es supervivencia, bajo dr
 
 ## Tabla comparativa
 
-| Activo | Estado | Trades | WR | Sharpe | Sortino | PF | DD | P&L | WF+ |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| EURUSD | OK | 176 | 48.3% | 0.674 | 1.186 | 1.27 | 11.4% | +$63.13 | 8/10 |
-| XAUUSD | NO OPERABLE | - | - | - | - | - | - | - | - |
-| GBPUSD | OK | 182 | 44.5% | 0.253 | 0.422 | 1.07 | 20.3% | +$17.84 | 6/10 |
-| USDJPY | OK | 131 | 44.3% | 0.086 | 0.141 | 1.02 | 17.4% | +$2.94 | 4/10 |
-| NAS100 | OK | 56 | 33.9% | -1.251 | -1.520 | 0.49 | 22.1% | $-33.19 | 1/10 |
-| US30 | OK | 52 | 42.3% | -0.591 | -0.792 | 0.66 | 16.0% | $-21.03 | 0/10 |
-| BTCUSD | SIN DATOS | - | - | - | - | - | - | - | - |
+| Activo | Veredicto | Trades | WR | Sharpe | Sortino | PF | DD | P&L | Mes+ | WF+ | Bootstrap IC95% |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| EURUSD | APTO SOLO PAPER | 176 | 48.3% | 0.674 | 1.186 | 1.27 | 11.4% | +$63.13 | 54.0% | 8/10 | [-0.185, 1.503] |
+| XAUUSD | NO OPERABLE | - | - | - | - | - | - | - | - | - | - |
+| GBPUSD | NO VALIDADO | 182 | 44.5% | 0.253 | 0.422 | 1.07 | 20.3% | +$17.84 | 49.2% | 6/10 | [-0.630, 1.074] |
+| USDJPY | NO VALIDADO | 131 | 44.3% | 0.086 | 0.141 | 1.02 | 17.4% | +$2.94 | 38.1% | 4/10 | [-0.803, 0.934] |
+| NAS100 | NO VALIDADO | 56 | 33.9% | -1.251 | -1.520 | 0.49 | 22.1% | $-33.19 | 16.7% | 1/10 | [-2.656, -0.250] |
+| US30 | NO VALIDADO | 52 | 42.3% | -0.591 | -0.792 | 0.66 | 16.0% | $-21.03 | 12.5% | 0/10 | [-1.635, 0.248] |
+| BTCUSD | NO VALIDADO | - | - | - | - | - | - | - | - | - | - |
 
 ## Riesgos y gaps
 - XAUUSD: no operable con $150; min lot arriesga 10.86% aprox.
